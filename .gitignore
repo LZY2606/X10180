@@ -34,3 +34,8 @@ coverage/
 .vite/
 .turbo/
 *.tsbuildinfo
+
+# 本地运行数据库
+*.db
+*.db-wal
+*.db-shm

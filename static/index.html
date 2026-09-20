@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>点云经纬</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --line:#2a313c; --fg:#e6edf3; --dim:#9aa7b4; --accent:#4aa8ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--fg); display:flex; flex-direction:column; height:100vh; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header h1 { font-size:18px; margin:0; letter-spacing:2px; }
+  header .sub { color:var(--dim); font-size:12px; }
+  main { flex:1; display:flex; min-height:0; }
+  #view { flex:1; position:relative; background:#0a0d12; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; }
+  aside { width:380px; border-left:1px solid var(--line); background:var(--panel);
+          overflow-y:auto; padding:12px 14px; }
+  .cards { display:flex; flex-wrap:wrap; gap:8px; }
+  .card { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:6px 10px; min-width:86px; }
+  .card b { display:block; font-size:16px; }
+  .card span { color:var(--dim); font-size:11px; }
+  h2 { font-size:13px; margin:16px 0 6px; color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  td,th { border-bottom:1px solid var(--line); padding:3px 5px; text-align:left; vertical-align:top; }
+  th { color:var(--dim); font-weight:500; }
+  .tag { display:inline-block; padding:0 6px; border-radius:10px; font-size:11px; }
+  .tag.late { background:#3b2e00; color:#ffd76a; }
+  .tag.dup { background:#3a1320; color:#ff8aaa; }
+  .tag.new { background:#0f2a1d; color:#7ee2a8; }
+  .tag.err { background:#3a1313; color:#ff9a9a; }
+  .tag.ok { background:#0d2440; color:#8fc4ff; }
+  #tooltip { position:absolute; pointer-events:none; background:#0d1117f0; border:1px solid var(--line);
+             border-radius:6px; padding:6px 8px; font-size:11px; display:none; max-width:280px; z-index:5; }
+  button { background:#1f6feb; color:white; border:0; border-radius:6px; padding:5px 12px; cursor:pointer; }
+  button.secondary { background:#21262d; border:1px solid var(--line); }
+  .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  label { color:var(--dim); }
+  pre { background:#0d1117; border:1px solid var(--line); border-radius:6px; padding:8px;
+        white-space:pre-wrap; word-break:break-all; font-size:11px; max-height:220px; overflow:auto; }
+  .muted { color:var(--dim); }
+  .legend span { display:inline-block; margin-right:10px; font-size:11px; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>点云经纬</h1>
+  <span class="sub">按包切分 LiDAR · GNSS 姿态 · 设备标定 → 可核验的帧链</span>
+  <span class="spacer" style="flex:1"></span>
+  <button id="rebuild" class="secondary">重建派生块</button>
+  <button id="refresh">刷新</button>
+</header>
+<main>
+  <div id="view">
+    <canvas id="cv"></canvas>
+    <div id="tooltip"></div>
+  </div>
+  <aside>
+    <div class="cards" id="cards"></div>
+
+    <h2>图层</h2>
+    <div class="row legend">
+      <label><input type="checkbox" id="show-points" checked> 点云（按帧着色）</label>
+      <label><input type="checkbox" id="show-traj" checked> <span><i class="dot" style="background:#7ee2a8"></i>姿态轨迹</span></label>
+      <label><input type="checkbox" id="show-gaps" checked> <span><i class="dot" style="background:#ffd76a"></i>时间缺口</span></label>
+      <label><input type="checkbox" id="show-cand" checked> <span><i class="dot" style="background:#b48cff"></i>路径候选</span></label>
+    </div>
+    <div class="row">
+      <label>设备代次</label>
+      <select id="gen-filter" style="background:#0d1117;color:var(--fg);border:1px solid var(--line)"></select>
+    </div>
+
+    <h2>点来源链（点击点查看）</h2>
+    <div id="point-info" class="muted">在左视图点击一个点，可反查原始点、经过的变换版本与误差传播。</div>
+
+    <h2>时间缺口</h2>
+    <div id="gaps"></div>
+
+    <h2>数据包（原始事实）</h2>
+    <div id="packets"></div>
+
+    <h2>标定版本与事件</h2>
+    <div id="edges"></div>
+    <div id="events"></div>
+  </aside>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { points: [], gaps: [], traj: [], gens: [], packets: [], edges: [], events: [],
+                hits: [], selectedGen: "all", candPaths: [] };
+</script>
+<script>
+async function getJSON(u){ const r = await fetch(u); if(!r.ok){throw new Error(u+" "+r.status)} return r.json(); }
+
+function hslForFrame(id){ let h = (id*47)%360; return `hsl(${h} 80% 62%)`; }
+function genColor(g){ let h=(g*97)%360; return `hsl(${h} 70% 60%)`; }
+
+async function loadAll(){
+  const [stats,gens,packets,gaps,cloud,traj,edges,events] = await Promise.all([
+    getJSON("/api/stats"), getJSON("/api/generations"), getJSON("/api/packets"),
+    getJSON("/api/gaps?threshold=0.2"), getJSON("/api/points?limit=30000"),
+    getJSON("/api/trajectory"), getJSON("/api/edges?all=true"), getJSON("/api/events?limit=20"),
+  ]);
+  state.gens=gens; state.packets=packets; state.gaps=gaps;
+  state.points=cloud.points; state.traj=traj; state.edges=edges; state.events=events;
+  renderStats(stats, cloud); renderGens(); renderGaps(); renderPackets(); renderEdges(); renderEvents();
+  draw();
+}
+
+function renderStats(s, cloud){
+  const items=[["原始包",s.packets],["代次",s.generations],["重叠包",s.duplicates],
+    ["原始点",s.raw_points],["ready 块",s.ready_blocks],["error 块",s.error_blocks],
+    ["building 块",s.building_blocks],["派生点",s.derived_points],["边版本",s.edges_versions]];
+  $("#cards").innerHTML = items.map(([k,v])=>`<div class="card"><b>${v}</b><span>${k}</span></div>`).join("");
+}
+
+function renderGens(){
+  const cur=$("#gen-filter").value||"all";
+  $("#gen-filter").innerHTML = `<option value="all">全部代次</option>` +
+    state.gens.map(g=>`<option value="g${g.id}">${g.kind} #${g.id} ${g.device_id}（${g.note}）</option>`).join("");
+  $("#gen-filter").value=[...$("#gen-filter").options].some(o=>o.value===cur)?cur:"all";
+  state.selectedGen=$("#gen-filter").value;
+}
+$("#gen-filter").addEventListener("change",()=>{state.selectedGen=$("#gen-filter").value;draw();});
+
+function draw(){
+  const cv=$("#cv"), dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth, h=cv.clientHeight;
+  cv.width=w*dpr; cv.height=h*dpr;
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle="#0a0d12"; ctx.fillRect(0,0,w,h);
+
+  const pts = state.points.filter(p=>state.selectedGen==="all" || state.selectedGen==="g"+p.gen_id);
+  const traj = state.traj.filter(p=>state.selectedGen==="all" || state.selectedGen==="g"+p.gen_id);
+  const allX=[...pts.map(p=>p.x), ...traj.map(p=>p.x)];
+  const allY=[...pts.map(p=>p.y), ...traj.map(p=>p.y)];
+  if(!allX.length){ ctx.fillStyle="#667"; ctx.font="14px sans-serif";
+    ctx.fillText("暂无可显示数据（派生块可能全部失败）",20,30); return; }
+  let minX=Math.min(...allX),maxX=Math.max(...allX),minY=Math.min(...allY),maxY=Math.max(...allY);
+  const pad=40; const sx=Math.max(maxX-minX,1e-6), sy=Math.max(maxY-minY,1e-6);
+  const k=Math.min((w-2*pad)/sx,(h-2*pad)/sy);
+  const ox=pad+(w-2*pad-sx*k)/2, oy=h-pad-(h-2*pad-sy*k)/2;
+  const X=(x)=>ox+(x-minX)*k, Y=(y)=>oy-(y-minY)*k;
+  state._proj={X,Y};
+
+  // 网格
+  ctx.strokeStyle="#171d26"; ctx.lineWidth=1;
+  for(let i=0;i<=8;i++){ const gx=pad+i*(w-2*pad)/8;
+    ctx.beginPath();ctx.moveTo(gx,pad);ctx.lineTo(gx,h-pad);ctx.stroke(); }
+  for(let j=0;j<=8;j++){ const gy=pad+j*(h-2*pad)/8;
+    ctx.beginPath();ctx.moveTo(pad,gy);ctx.lineTo(w-pad,gy);ctx.stroke(); }
+
+  // 时间缺口（在轨迹两端用黄色竖线 + 弧）
+  if($("#show-gaps").checked){
+    ctx.strokeStyle="#ffd76a"; ctx.fillStyle="#ffd76a"; ctx.lineWidth=1.5;
+    for(const g of state.gaps){
+      if(g.kind!=="pose") continue;
+      const pa=state.packets.find(p=>p.id===g.from_packet);
+      const pb=state.packets.find(p=>p.id===g.to_packet);
+      const a=state.traj.find(t=>t.t===g.from_time), b=state.traj.find(t=>t.t===g.to_time);
+      if(a&&b){
+        ctx.beginPath(); ctx.moveTo(X(a.x),Y(a.y)); ctx.lineTo(X(b.x),Y(b.y));
+        ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillText(`缺口 ${g.gap_sec.toFixed(2)}s`,(X(a.x)+X(b.x))/2,(Y(a.y)+Y(b.y))/2-6);
+      }
+    }
+  }
+
+  // 点云
+  state.hits=[];
+  if($("#show-points").checked){
+    for(const p of pts){
+      ctx.fillStyle=hslForFrame(p.packet_id);
+      const px=X(p.x), py=Y(p.y);
+      ctx.fillRect(px-1.2,py-1.2,2.4,2.4);
+      state.hits.push({px,py,p});
+    }
+  }
+  // 轨迹
+  if($("#show-traj").checked){
+    ctx.strokeStyle="#7ee2a8"; ctx.lineWidth=1.6; ctx.beginPath();
+    let started=false; let lastGen=null;
+    for(const t of traj){
+      if(lastGen!==null && t.gen_id!==lastGen){ started=false; }
+      const px=X(t.x),py=Y(t.y);
+      if(!started){ctx.moveTo(px,py);started=true;} else ctx.lineTo(px,py);
+      lastGen=t.gen_id;
+    }
+    ctx.stroke();
+    for(const t of traj){ ctx.fillStyle=genColor(t.gen_id);
+      ctx.beginPath();ctx.arc(X(t.x),Y(t.y),2.4,0,7);ctx.fill(); }
+  }
+
+  // 路径候选：在图角列出（map 系点云由选中路径生成；候选在侧栏展开）
+  if($("#show-cand").checked){
+    ctx.fillStyle="#b48cff"; ctx.font="11px sans-serif";
+    ctx.fillText(`帧数 ${new Set(pts.map(p=>p.packet_id)).size} · 点 ${pts.length}`,12,16);
+  }
+}
+
+["show-points","show-traj","show-gaps","show-cand"].forEach(id=>$("#"+id).addEventListener("change",draw));
+window.addEventListener("resize",draw);
+
+$("#cv").addEventListener("click", async (e)=>{
+  if(!state._proj) return;
+  const rect=$("#cv").getBoundingClientRect();
+  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  let best=null,bd=10;
+  for(const h of state.hits){ const d=(h.px-mx)**2+(h.py-my)**2; if(d<bd){bd=d;best=h;} }
+  const tip=$("#tooltip");
+  if(!best){ tip.style.display="none"; return; }
+  tip.style.left=(best.px+10)+"px"; tip.style.top=(best.py+10)+"px";
+  tip.style.display="block"; tip.textContent=`点 #${best.p.id} · 帧包 ${best.p.packet_id} · 代次 ${best.p.gen_id}`;
+  const [pc,chain]=await getJSON("/api/point/"+best.p.id);
+  $("#point-info").innerHTML = pointHTML(pc,chain);
+});
+
+function pointHTML(p,c){
+  const rows=c.map(s=>`<tr><td>${s.step}</td><td>${s.edge_key}<br><span class="muted">v${s.edge_version} · ${s.edge_kind}</span></td>
+    <td>${s.valid_from.toFixed(3)}<br>${s.valid_to.toFixed(3)}</td><td>${s.cov_trace.toExponential(2)}</td></tr>`).join("");
+  return `<table>
+    <tr><th>派生点</th><td>#${p.id}（raw #${p.raw_point_id}，块 #${p.block_id}）</td></tr>
+    <tr><th>map 坐标</th><td>(${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)}) m</td></tr>
+    <tr><th>位置σ²对角</th><td>(${p.cov.map(v=>v.toExponential(2)).join(", ")})</td></tr>
+    <tr><th>原始坐标</th><td>(${p.raw.map(v=>v.toFixed(3)).join(", ")}) ${p.raw_unit}（设备 ${p.device_id}）</td></tr>
+    <tr><th>包/序号</th><td>#${p.packet_id} · seq ${p.seq} · gen ${p.gen_id} · t ${p.unix_time? p.unix_time.toFixed(3):"-"}</td></tr>
+    <tr><th>路径精度迹</th><td>${p.path_score.toExponential(3)}（越小越精确）</td></tr>
+  </table>
+  <h2 style="margin-top:10px">经过的变换版本与误差传播</h2>
+  <table><tr><th>#</th><th>边/版本</th><th>有效时间窗</th><th>协方差迹</th></tr>${rows}</table>
+  <p class="muted">协方差按 SE(3) 伴随传播：Σ_g = AdᵀΣ_a Ad + Σ_b；点位置 σ²=J Σ Jᵀ。</p>`;
+}
+
+function renderGaps(){
+  $("#gaps").innerHTML = state.gaps.length? `<table><tr><th>设备</th><th>类型</th><th>代次</th><th>缺口</th><th>包</th></tr>` +
+    state.gaps.map(g=>`<tr><td>${g.device_id}</td><td>${g.kind}</td><td>#${g.gen_id}</td>
+      <td><span class="tag late">${g.gap_sec.toFixed(2)}s</span></td><td>${g.from_packet}→${g.to_packet}</td></tr>`).join("")+"</table>"
+    : `<p class="muted">未发现超过阈值的同代次内时间缺口。</p>`;
+}
+
+function renderPackets(){
+  const rows=state.packets.slice().sort((a,b)=>b.received_order-a.received_order).slice(0,40).map(p=>{
+    const tags=[];
+    if(p.is_duplicate) tags.push(`<span class="tag dup">重叠/${p.duplicate_of??"?"}</span>`);
+    if(p.is_late) tags.push(`<span class="tag late">迟到</span>`);
+    if(p.block_status==="ready") tags.push(`<span class="tag ok">ready</span>`);
+    if(p.block_status==="error") tags.push(`<span class="tag err">${p.block_error.slice(0,18)}</span>`);
+    return `<tr><td>${p.received_order}</td><td>${p.kind}</td><td>${p.device_id}</td><td>#${p.gen_id}</td>
+      <td>${p.seq}</td><td>${p.time_desc}</td><td>${p.coord_system}/${p.unit}</td>
+      <td>${p.point_count}</td><td><div style="max-width:170px">${p.content_summary}<br>${tags.join(" ")}</div></td></tr>`;
+  }).join("");
+  $("#packets").innerHTML=`<table><tr><th>接收序</th><th>类</th><th>设备</th><th>代次</th><th>序号</th>
+    <th>原始时间</th><th>系/单位</th><th>点数</th><th>摘要/状态</th></tr>${rows}</table>`;
+}
+
+function renderEdges(){
+  const grouped={};
+  for(const e of state.edges){ (grouped[e.key]??=[]).push(e); }
+  $("#edges").innerHTML = Object.entries(grouped).map(([k,es])=>{
+    const active=es.find(e=>e.active);
+    const old=es.filter(e=>!e.active).length;
+    return `<div style="margin:4px 0"><b>${k}</b>
+      <span class="tag ${active?"ok":""}">${active?`v${active.version} ${active.source_frame}→${active.target_frame}`:"无生效版本"}</span>
+      ${old?`<span class="muted">历史版本 ${old}</span>`:""}</div>`;
+  }).join("") || `<p class="muted">尚无标定。</p>`;
+}
+
+function renderEvents(){
+  $("#events").innerHTML = state.events.length? state.events.map(e=>
+    `<div style="margin:3px 0"><span class="tag ${e.level==="warn"?"dup":"new"}">${e.code}</span>
+     <span class="muted">${new Date(e.at*1000).toLocaleTimeString()}</span> ${e.message}</div>`).join("")
+    : `<p class="muted">无事件。</p>`;
+}
+
+$("#rebuild").addEventListener("click", async ()=>{
+  $("#rebuild").disabled=true;
+  try{ const r=await fetch("/api/rebuild",{method:"POST"});
+    const j=await r.json();
+    alert(`重建完成：${j.built} 块，恢复半块 ${j.recovered_stale}，错误 ${j.errors.length}`);
+    await loadAll();
+  }finally{ $("#rebuild").disabled=false; }
+});
+$("#refresh").addEventListener("click",loadAll);
+loadAll();
+</script>
+</body>
+</html>
