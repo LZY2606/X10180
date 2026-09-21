@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>点云经纬</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>点云经纬</h1>
+    <div class="sub">可核验帧链 · 代次 · 时间缺口 · 路径候选 · 来源链</div>
+    <div class="controls">
+      <label>着色
+        <select id="colorMode">
+          <option value="frame">按帧/代次</option>
+          <option value="time">按时间</option>
+          <option value="aligned">按对齐状态</option>
+        </select>
+      </label>
+      <label>视角
+        <select id="view">
+          <option value="xy">俯视图 X-Y</option>
+          <option value="xz">侧视图 X-Z</option>
+          <option value="3d">透视 3D</option>
+        </select>
+      </label>
+      <button id="refresh">刷新</button>
+      <button id="revise">下发标定 v3（局部失效）</button>
+      <button id="reset">重置演示数据</button>
+    </div>
+  </header>
+  <main>
+    <section class="canvas-wrap">
+      <canvas id="scene" width="860" height="620"></canvas>
+      <div id="legend" class="legend"></div>
+      <div id="hint" class="hint">滚轮缩放 · 拖拽平移 · 点击点查看来源链</div>
+    </section>
+    <aside id="panel" class="panel">
+      <h2>状态</h2>
+      <div id="summary"></div>
+      <h2>路径候选</h2>
+      <div id="routes"></div>
+      <h2>点来源链</h2>
+      <div id="provenance">点击左侧任意点。</div>
+    </aside>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
