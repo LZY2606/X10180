@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>点云经纬</title>
+<style>
+  body { margin:0; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background:#0d1117; color:#c9d1d9; }
+  header { padding:10px 16px; background:#161b22; border-bottom:1px solid #30363d; display:flex; align-items:baseline; gap:16px; }
+  header h1 { font-size:18px; margin:0; color:#58a6ff; }
+  header .sub { font-size:12px; color:#8b949e; }
+  #main { display:flex; height:calc(100vh - 49px); }
+  #view { flex:1; position:relative; }
+  canvas { width:100%; height:100%; display:block; cursor:crosshair; }
+  #side { width:320px; border-left:1px solid #30363d; padding:10px; overflow-y:auto; font-size:12px; }
+  #side h2 { font-size:13px; color:#58a6ff; margin:12px 0 4px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:8px; margin-bottom:8px; }
+  .chosen { border-color:#3fb950; }
+  .cand { border-color:#d29922; }
+  .gap { color:#f85149; }
+  pre { white-space:pre-wrap; word-break:break-all; font-size:11px; color:#8b949e; }
+  button { background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:4px 10px; cursor:pointer; }
+  button:hover { border-color:#58a6ff; }
+  #legend span { display:inline-block; margin-right:10px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>点云经纬</h1>
+  <span class="sub">LiDAR / GNSS / 标定 帧链对齐与核验</span>
+  <button onclick="loadAll()">刷新</button>
+  <button onclick="runDerive()">重算派生块</button>
+</header>
+<div id="main">
+  <div id="view"><canvas id="cv"></canvas></div>
+  <div id="side">
+    <h2>图例</h2>
+    <div id="legend" class="card"></div>
+    <h2>时间缺口</h2>
+    <div id="gaps"></div>
+    <h2>路径候选 (sensor → map)</h2>
+    <div id="paths"></div>
+    <h2>来源链（点击点）</h2>
+    <div id="prov" class="card">尚未选择点</div>
+  </div>
+</div>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const PALETTE = ['#58a6ff','#3fb950','#d29922','#f778ba','#a371f7','#39c5cf','#f85149'];
+let cloud = {points:[], gaps:[]}, poseList = [], paths = null;
+let view = {cx:0, cy:0, scale:20};
+let frames = [];
+
+function frameColor(f){ const i = frames.indexOf(f); return PALETTE[((i%PALETTE.length)+PALETTE.length)%PALETTE.length]; }
+
+function project(p){
+  // 简单正交投影（XY 平面），不依赖任何外部地图/点云资源
+  return [cv.width/2 + (p[0]-view.cx)*view.scale, cv.height/2 - (p[1]-view.cy)*view.scale];
+}
+
+function draw(){
+  cv.width = cv.clientWidth * devicePixelRatio;
+  cv.height = cv.clientHeight * devicePixelRatio;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  // 姿态轨迹
+  ctx.strokeStyle = '#8b949e'; ctx.lineWidth = 1; ctx.beginPath();
+  let started = false, lastEpoch = null;
+  for(const s of poseList){
+    if(!s.trans) continue;
+    const [x,y] = project([s.trans.x, s.trans.y, s.trans.z||0]);
+    if(!started || s.epoch !== lastEpoch){ ctx.moveTo(x,y); started = true; }
+    else ctx.lineTo(x,y);
+    lastEpoch = s.epoch;
+  }
+  ctx.stroke();
+  // 稀疏点云，按帧着色
+  for(const q of cloud.points){
+    const [x,y] = project(q.p);
+    ctx.fillStyle = frameColor(q.frame);
+    ctx.fillRect(x-1.5, y-1.5, 3, 3);
+  }
+  // 时间缺口标记
+  ctx.fillStyle = '#f85149';
+  for(const g of cloud.gaps){
+    const near = cloud.points.find(q => q.t >= g.from && q.t <= g.to);
+    if(near){ const [x,y] = project(near.p); ctx.beginPath(); ctx.arc(x,y,6,0,7); ctx.stroke(); }
+  }
+}
+
+async function loadAll(){
+  cloud = await (await fetch('/api/cloud')).json();
+  poseList = await (await fetch('/api/poses')).json();
+  paths = await (await fetch('/api/path?from=lidar&to=map')).json();
+  frames = [...new Set(cloud.points.map(q=>q.frame))];
+  document.getElementById('legend').innerHTML =
+    frames.map(f=>`<span><span class="dot" style="background:${frameColor(f)}"></span>${f}</span>`).join('') || '无数据';
+  document.getElementById('gaps').innerHTML = cloud.gaps.length
+    ? cloud.gaps.map(g=>`<div class="card gap">设备 ${g.device} 代次 ${g.epoch}: ${g.from.toFixed(2)}s → ${g.to.toFixed(2)}s</div>`).join('')
+    : '<div class="card">无缺口</div>';
+  let ph = '';
+  if(paths && paths.chosen) ph += `<div class="card chosen">已选: ${paths.chosen.frames.join(' → ')}<br>版本 [${paths.chosen.versions}] 协方差迹 ${paths.chosen.cov_trace.toExponential(3)}</div>`;
+  if(paths) for(const c of paths.candidates) ph += `<div class="card cand">候选: ${c.frames.join(' → ')}<br>版本 [${c.versions}] 协方差迹 ${c.cov_trace.toExponential(3)}</div>`;
+  document.getElementById('paths').innerHTML = ph || '<div class="card">无路径</div>';
+  draw();
+}
+
+async function runDerive(){
+  const r = await fetch('/api/derive', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({sensor_frame:'lidar', body_frame:'body', map_frame:'map'})});
+  const j = await r.json();
+  document.getElementById('prov').innerHTML = '派生完成: ' + JSON.stringify(j);
+  loadAll();
+}
+
+cv.addEventListener('click', async (e) => {
+  const r = cv.getBoundingClientRect();
+  const mx = (e.clientX - r.left) * devicePixelRatio, my = (e.clientY - r.top) * devicePixelRatio;
+  let best = null, bd = 1e9;
+  for(const q of cloud.points){
+    const [x,y] = project(q.p);
+    const d = (x-mx)**2 + (y-my)**2;
+    if(d < bd){ bd = d; best = q; }
+  }
+  if(!best || bd > 900) return;
+  const prov = await (await fetch(`/api/provenance?block=${best.block}&idx=${best.idx}`)).json();
+  document.getElementById('prov').innerHTML =
+    `<b>块 ${prov.block}</b> 包 ${prov.packet_id} t=${prov.t?.toFixed(3)}<pre>${JSON.stringify(prov.chain, null, 2)}</pre>`;
+});
+
+cv.addEventListener('wheel', (e) => { view.scale *= e.deltaY < 0 ? 1.1 : 0.9; draw(); e.preventDefault(); }, {passive:false});
+loadAll();
+</script>
+</body>
+</html>
