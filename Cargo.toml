@@ -1,0 +1,21 @@
+[package]
+name = "pcw"
+version = "0.1.0"
+edition = "2021"
+description = "点云经纬：LiDAR/GNSS 帧链对齐与可核验变换图"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tower-listener = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nalgebra = "0.33"
+
+[[bin]]
+name = "pcw"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 1
