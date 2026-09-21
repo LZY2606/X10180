@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>点云经纬</title>
+<style>
+  :root {
+    --bg: #0f141b; --panel: #161d27; --line: #27313f; --text: #dce6f2;
+    --muted: #8b9bb0; --accent: #4ea1ff; --warn: #ffb84d; --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: grid; grid-template-columns: 1fr 360px; grid-template-rows: auto 1fr;
+    height: 100vh;
+  }
+  header {
+    grid-column: 1 / 3; padding: 10px 16px; display: flex; align-items: center;
+    gap: 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: 2px; }
+  header .sub { color: var(--muted); }
+  header button, .bar button {
+    background: #1d2836; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer;
+  }
+  header button:hover, .bar button:hover { border-color: var(--accent); }
+  main { position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  aside {
+    background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 12px;
+  }
+  .card {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 12px; background: #121925;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
+  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 8px; }
+  .kv .k { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 2px 4px; border-bottom: 1px solid #1e2836; }
+  th { color: var(--muted); font-weight: normal; }
+  .tag { padding: 0 6px; border-radius: 10px; font-size: 11px; }
+  .tag.done { background: #143524; color: #5fd68c; }
+  .tag.blocked { background: #3a2b14; color: var(--warn); }
+  .tag.pending { background: #1c2c40; color: #7db4ff; }
+  .tag.normal { background: #1c2c40; color: #7db4ff; }
+  .tag.duplicate, .tag.overlap { background: #3a1420; color: var(--err); }
+  .tag.generation_restart, .tag.generation_gap { background: #3a2b14; color: var(--warn); }
+  .tag.late { background: #2d2340; color: #c39bff; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+  .scroll { max-height: 200px; overflow-y: auto; }
+  .legend span { display: inline-block; margin-right: 10px; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .candidate.selected { color: #5fd68c; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; color: #b9c7d9; }
+  .bar { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; }
+  .hint { position: absolute; bottom: 8px; left: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>点云经纬</h1>
+  <span class="sub">稀疏点云 · 帧链 · 变换版本 · 误差传播</span>
+  <span style="flex:1"></span>
+  <button id="btn-recompute">重新派生</button>
+  <button id="btn-reset">重置演示数据</button>
+  <span id="state" class="sub"></span>
+</header>
+<main>
+  <div class="bar">
+    <button data-view="xy">俯视 XY</button>
+    <button data-view="xz">侧视 XZ</button>
+  </div>
+  <canvas id="view"></canvas>
+  <div class="hint legend">
+    <span><i class="dot" style="background:#4ea1ff"></i>主姿态轨迹</span>
+    <span><i class="dot" style="background:#ffb84d"></i>备选轨迹</span>
+    <span><i class="dot" style="background:#ff6b6b"></i>时间缺口</span>
+    <span>点按帧着色，点击点查看来源链</span>
+  </div>
+</main>
+<aside>
+  <div class="card" id="card-point">
+    <h3>点来源链</h3>
+    <div id="point-body" class="kv"><span class="k">提示</span><span>在左侧点击任意点</span></div>
+  </div>
+  <div class="card">
+    <h3>路径候选</h3>
+    <div id="paths" class="scroll mono"></div>
+  </div>
+  <div class="card">
+    <h3>派生块</h3>
+    <div id="blocks" class="scroll"></div>
+  </div>
+  <div class="card">
+    <h3>数据包（原始时间戳/坐标系/单位/摘要）</h3>
+    <div id="packets" class="scroll"></div>
+  </div>
+  <div class="card">
+    <h3>变换版本</h3>
+    <div id="edges" class="scroll mono"></div>
+  </div>
+</aside>
+<script src="/static/app.js"></script>
+</body>
+</html>
